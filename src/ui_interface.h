@@ -11,6 +11,7 @@
 #include <string>
 
 class CBlockIndex;
+enum class SynchronizationState;
 struct bilingual_str;
 
 namespace boost {
@@ -110,18 +111,17 @@ public:
     ADD_SIGNALS_DECL_WRAPPER(ShowProgress, void, const std::string& title, int nProgress, bool resume_possible);
 
     /** New block has been accepted */
-    ADD_SIGNALS_DECL_WRAPPER(NotifyBlockTip, void, bool, const CBlockIndex*);
+    ADD_SIGNALS_DECL_WRAPPER(NotifyBlockTip, void, SynchronizationState, const CBlockIndex*);
 
     /** Best header has changed */
-    ADD_SIGNALS_DECL_WRAPPER(NotifyHeaderTip, void, bool, const CBlockIndex*);
+    ADD_SIGNALS_DECL_WRAPPER(NotifyHeaderTip, void, SynchronizationState, const CBlockIndex*);
 
     /** Banlist did change. */
     ADD_SIGNALS_DECL_WRAPPER(BannedListChanged, void, void);
 };
 
 /** Show warning message **/
-// TODO: InitWarning() should take a bilingual_str parameter.
-void InitWarning(const std::string& str);
+void InitWarning(const bilingual_str& str);
 
 /** Show error message **/
 bool InitError(const bilingual_str& str);

@@ -10,6 +10,7 @@
 #include <net_types.h>  // For banmap_t
 #include <netaddress.h> // For Network
 #include <support/allocators/secure.h> // For SecureString
+#include <util/translation.h>
 
 #include <functional>
 #include <memory>
@@ -27,6 +28,7 @@ class Coin;
 class RPCTimerInterface;
 class UniValue;
 class proxyType;
+enum class SynchronizationState;
 enum class WalletCreationStatus;
 struct CNodeStateStats;
 struct NodeContext;
@@ -35,6 +37,7 @@ struct bilingual_str;
 namespace interfaces {
 class Handler;
 class Wallet;
+struct BlockTip;
 
 //! Top-level interface for a bitcoin node (bitcoind process).
 class Node
@@ -43,7 +46,7 @@ public:
     virtual ~Node() {}
 
     //! Send init error.
-    virtual void initError(const std::string& message) = 0;
+    virtual void initError(const bilingual_str& message) = 0;
 
     //! Set command line arguments.
     virtual bool parseParameters(int argc, const char* const argv[], std::string& error) = 0;
@@ -79,7 +82,7 @@ public:
     virtual void initParameterInteraction() = 0;
 
     //! Get warnings.
-    virtual std::string getWarnings() = 0;
+    virtual bilingual_str getWarnings() = 0;
 
     // Get log flags.
     virtual uint32_t getLogCategories() = 0;
@@ -147,6 +150,9 @@ public:
 
     //! Get num blocks.
     virtual int getNumBlocks() = 0;
+
+    //! Get best block hash.
+    virtual uint256 getBestBlockHash() = 0;
 
     //! Get last block time.
     virtual int64_t getLastBlockTime() = 0;
@@ -249,12 +255,12 @@ public:
 
     //! Register handler for block tip messages.
     using NotifyBlockTipFn =
-        std::function<void(bool initial_download, int height, int64_t block_time, double verification_progress)>;
+        std::function<void(SynchronizationState, interfaces::BlockTip tip, double verification_progress)>;
     virtual std::unique_ptr<Handler> handleNotifyBlockTip(NotifyBlockTipFn fn) = 0;
 
     //! Register handler for header tip messages.
     using NotifyHeaderTipFn =
-        std::function<void(bool initial_download, int height, int64_t block_time, double verification_progress)>;
+        std::function<void(SynchronizationState, interfaces::BlockTip tip, double verification_progress)>;
     virtual std::unique_ptr<Handler> handleNotifyHeaderTip(NotifyHeaderTipFn fn) = 0;
 
     //! Return pointer to internal chain interface, useful for testing.
@@ -263,6 +269,13 @@ public:
 
 //! Return implementation of Node interface.
 std::unique_ptr<Node> MakeNode();
+
+//! Block tip (could be a header or not, depends on the subscribed signal).
+struct BlockTip {
+    int block_height;
+    int64_t block_time;
+    uint256 block_hash;
+};
 
 } // namespace interfaces
 

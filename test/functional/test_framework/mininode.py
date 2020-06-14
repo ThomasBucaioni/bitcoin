@@ -31,6 +31,9 @@ from test_framework.messages import (
     msg_block,
     MSG_BLOCK,
     msg_blocktxn,
+    msg_cfcheckpt,
+    msg_cfheaders,
+    msg_cfilter,
     msg_cmpctblock,
     msg_feefilter,
     msg_filteradd,
@@ -67,6 +70,9 @@ MESSAGEMAP = {
     b"addr": msg_addr,
     b"block": msg_block,
     b"blocktxn": msg_blocktxn,
+    b"cfcheckpt": msg_cfcheckpt,
+    b"cfheaders": msg_cfheaders,
+    b"cfilter": msg_cfilter,
     b"cmpctblock": msg_cmpctblock,
     b"feefilter": msg_feefilter,
     b"filteradd": msg_filteradd,
@@ -120,9 +126,9 @@ class P2PConnection(asyncio.Protocol):
     def is_connected(self):
         return self._transport is not None
 
-    def peer_connect(self, dstaddr, dstport, *, net, factor):
+    def peer_connect(self, dstaddr, dstport, *, net, timeout_factor):
         assert not self.is_connected
-        self.factor = factor
+        self.timeout_factor = timeout_factor
         self.dstaddr = dstaddr
         self.dstport = dstport
         # The initial message to send after the connection was made:
@@ -328,6 +334,9 @@ class P2PInterface(P2PConnection):
     def on_addr(self, message): pass
     def on_block(self, message): pass
     def on_blocktxn(self, message): pass
+    def on_cfcheckpt(self, message): pass
+    def on_cfheaders(self, message): pass
+    def on_cfilter(self, message): pass
     def on_cmpctblock(self, message): pass
     def on_feefilter(self, message): pass
     def on_filteradd(self, message): pass
@@ -368,8 +377,8 @@ class P2PInterface(P2PConnection):
 
     # Connection helper methods
 
-    def wait_until(self, test_function, timeout):
-        wait_until(test_function, timeout=timeout, lock=mininode_lock, factor=self.factor)
+    def wait_until(self, test_function, timeout=60):
+        wait_until(test_function, timeout=timeout, lock=mininode_lock, timeout_factor=self.timeout_factor)
 
     def wait_for_disconnect(self, timeout=60):
         test_function = lambda: not self.is_connected
@@ -642,12 +651,24 @@ class P2PTxInvStore(P2PInterface):
         self.tx_invs_received = defaultdict(int)
 
     def on_inv(self, message):
+        super().on_inv(message) # Send getdata in response.
         # Store how many times invs have been received for each tx.
         for i in message.inv:
             if i.type == MSG_TX:
                 # save txid
                 self.tx_invs_received[i.hash] += 1
 
+        super().on_inv(message)
+
     def get_invs(self):
         with mininode_lock:
             return list(self.tx_invs_received.keys())
+
+    def wait_for_broadcast(self, txns, timeout=60):
+        """Waits for the txns (list of txids) to complete initial broadcast.
+        The mempool should mark unbroadcast=False for these transactions.
+        """
+        # Wait until invs have been received (and getdatas sent) for each txid.
+        self.wait_until(lambda: set(self.get_invs()) == set([int(tx, 16) for tx in txns]), timeout)
+        # Flush messages and wait for the getdatas to be processed
+        self.sync_with_ping()

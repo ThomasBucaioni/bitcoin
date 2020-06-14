@@ -85,6 +85,8 @@ WalletView::WalletView(const PlatformStyle *_platformStyle, QWidget *parent):
     connect(sendCoinsPage, &SendCoinsDialog::message, this, &WalletView::message);
     // Pass through messages from transactionView
     connect(transactionView, &TransactionView::message, this, &WalletView::message);
+
+    connect(this, &WalletView::setPrivacy, overviewPage, &OverviewPage::setPrivacy);
 }
 
 WalletView::~WalletView()
@@ -97,6 +99,7 @@ void WalletView::setClientModel(ClientModel *_clientModel)
 
     overviewPage->setClientModel(_clientModel);
     sendCoinsPage->setClientModel(_clientModel);
+    if (walletModel) walletModel->setClientModel(_clientModel);
 }
 
 void WalletView::setWalletModel(WalletModel *_walletModel)
@@ -255,7 +258,7 @@ void WalletView::gotoLoadPSBT()
 
             TransactionError result = BroadcastTransaction(*clientModel->node().context(), tx, err_string, DEFAULT_MAX_RAW_TX_FEE_RATE.GetFeePerK(), /* relay */ true, /* wait_callback */ false);
             if (result == TransactionError::OK) {
-                Q_EMIT message(tr("Success"), tr("Broadcasted transaction sucessfully."), CClientUIInterface::MSG_INFORMATION | CClientUIInterface::MODAL);
+                Q_EMIT message(tr("Success"), tr("Broadcasted transaction successfully."), CClientUIInterface::MSG_INFORMATION | CClientUIInterface::MODAL);
             } else {
                 Q_EMIT message(tr("Error"), QString::fromStdString(err_string), CClientUIInterface::MSG_ERROR);
             }

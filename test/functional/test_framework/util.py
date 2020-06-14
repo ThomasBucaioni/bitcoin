@@ -208,10 +208,10 @@ def str_to_b64str(string):
 def satoshi_round(amount):
     return Decimal(amount).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
 
-def wait_until(predicate, *, attempts=float('inf'), timeout=float('inf'), lock=None, factor=1.0):
+def wait_until(predicate, *, attempts=float('inf'), timeout=float('inf'), lock=None, timeout_factor=1.0):
     if attempts == float('inf') and timeout == float('inf'):
         timeout = 60
-    timeout = timeout * factor
+    timeout = timeout * timeout_factor
     attempt = 0
     time_end = time.time() + timeout
 
@@ -381,7 +381,21 @@ def set_node_times(nodes, t):
         node.setmocktime(t)
 
 def disconnect_nodes(from_connection, node_num):
-    for peer_id in [peer['id'] for peer in from_connection.getpeerinfo() if "testnode%d" % node_num in peer['subver']]:
+    def get_peer_ids():
+        result = []
+        for peer in from_connection.getpeerinfo():
+            if "testnode{}".format(node_num) in peer['subver']:
+                result.append(peer['id'])
+        return result
+
+    peer_ids = get_peer_ids()
+    if not peer_ids:
+        logger.warning("disconnect_nodes: {} and {} were not connected".format(
+            from_connection.index,
+            node_num
+        ))
+        return
+    for peer_id in peer_ids:
         try:
             from_connection.disconnectnode(nodeid=peer_id)
         except JSONRPCException as e:
@@ -392,7 +406,7 @@ def disconnect_nodes(from_connection, node_num):
                 raise
 
     # wait to disconnect
-    wait_until(lambda: [peer['id'] for peer in from_connection.getpeerinfo() if "testnode%d" % node_num in peer['subver']] == [], timeout=5)
+    wait_until(lambda: not get_peer_ids(), timeout=5)
 
 def connect_nodes(from_connection, node_num):
     ip_port = "127.0.0.1:" + str(p2p_port(node_num))

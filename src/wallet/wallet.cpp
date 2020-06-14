@@ -21,6 +21,7 @@
 #include <script/descriptor.h>
 #include <script/script.h>
 #include <script/signingprovider.h>
+#include <txmempool.h>
 #include <util/bip32.h>
 #include <util/check.h>
 #include <util/error.h>
@@ -74,12 +75,6 @@ bool RemoveWallet(const std::shared_ptr<CWallet>& wallet)
     if (i == vpwallets.end()) return false;
     vpwallets.erase(i);
     return true;
-}
-
-bool HasWallets()
-{
-    LOCK(cs_wallets);
-    return !vpwallets.empty();
 }
 
 std::vector<std::shared_ptr<CWallet>> GetWallets()
@@ -153,7 +148,7 @@ void UnloadWallet(std::shared_ptr<CWallet>&& wallet)
 std::shared_ptr<CWallet> LoadWallet(interfaces::Chain& chain, const WalletLocation& location, bilingual_str& error, std::vector<bilingual_str>& warnings)
 {
     try {
-        if (!CWallet::Verify(chain, location, false, error, warnings)) {
+        if (!CWallet::Verify(chain, location, error, warnings)) {
             error = Untranslated("Wallet file verification failed.") + Untranslated(" ") + error;
             return nullptr;
         }
@@ -195,7 +190,7 @@ WalletCreationStatus CreateWallet(interfaces::Chain& chain, const SecureString& 
     }
 
     // Wallet::Verify will check if we're trying to create a wallet with a duplicate name.
-    if (!CWallet::Verify(chain, location, false, error, warnings)) {
+    if (!CWallet::Verify(chain, location, error, warnings)) {
         error = Untranslated("Wallet file verification failed.") + Untranslated(" ") + error;
         return WalletCreationStatus::CREATION_FAILED;
     }
@@ -1100,22 +1095,51 @@ void CWallet::SyncTransaction(const CTransactionRef& ptx, CWalletTx::Confirmatio
     MarkInputsDirty(ptx);
 }
 
-void CWallet::transactionAddedToMempool(const CTransactionRef& ptx) {
+void CWallet::transactionAddedToMempool(const CTransactionRef& tx) {
     LOCK(cs_wallet);
-    CWalletTx::Confirmation confirm(CWalletTx::Status::UNCONFIRMED, /* block_height */ 0, {}, /* nIndex */ 0);
-    SyncTransaction(ptx, confirm);
+    SyncTransaction(tx, {CWalletTx::Status::UNCONFIRMED, /* block height */ 0, /* block hash */ {}, /* index */ 0});
 
-    auto it = mapWallet.find(ptx->GetHash());
+    auto it = mapWallet.find(tx->GetHash());
     if (it != mapWallet.end()) {
         it->second.fInMempool = true;
     }
 }
 
-void CWallet::transactionRemovedFromMempool(const CTransactionRef &ptx) {
+void CWallet::transactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRemovalReason reason) {
     LOCK(cs_wallet);
-    auto it = mapWallet.find(ptx->GetHash());
+    auto it = mapWallet.find(tx->GetHash());
     if (it != mapWallet.end()) {
         it->second.fInMempool = false;
+    }
+    // Handle transactions that were removed from the mempool because they
+    // conflict with transactions in a newly connected block.
+    if (reason == MemPoolRemovalReason::CONFLICT) {
+        // Call SyncNotifications, so external -walletnotify notifications will
+        // be triggered for these transactions. Set Status::UNCONFIRMED instead
+        // of Status::CONFLICTED for a few reasons:
+        //
+        // 1. The transactionRemovedFromMempool callback does not currently
+        //    provide the conflicting block's hash and height, and for backwards
+        //    compatibility reasons it may not be not safe to store conflicted
+        //    wallet transactions with a null block hash. See
+        //    https://github.com/bitcoin/bitcoin/pull/18600#discussion_r420195993.
+        // 2. For most of these transactions, the wallet's internal conflict
+        //    detection in the blockConnected handler will subsequently call
+        //    MarkConflicted and update them with CONFLICTED status anyway. This
+        //    applies to any wallet transaction that has inputs spent in the
+        //    block, or that has ancestors in the wallet with inputs spent by
+        //    the block.
+        // 3. Longstanding behavior since the sync implementation in
+        //    https://github.com/bitcoin/bitcoin/pull/9371 and the prior sync
+        //    implementation before that was to mark these transactions
+        //    unconfirmed rather than conflicted.
+        //
+        // Nothing described above should be seen as an unchangeable requirement
+        // when improving this code in the future. The wallet's heuristics for
+        // distinguishing between conflicted and unconfirmed transactions are
+        // imperfect, and could be improved in general, see
+        // https://github.com/bitcoin-core/bitcoin-devwiki/wiki/Wallet-Transaction-Conflict-Tracking
+        SyncTransaction(tx, {CWalletTx::Status::UNCONFIRMED, /* block height */ 0, /* block hash */ {}, /* index */ 0});
     }
 }
 
@@ -1127,9 +1151,8 @@ void CWallet::blockConnected(const CBlock& block, int height)
     m_last_block_processed_height = height;
     m_last_block_processed = block_hash;
     for (size_t index = 0; index < block.vtx.size(); index++) {
-        CWalletTx::Confirmation confirm(CWalletTx::Status::CONFIRMED, height, block_hash, index);
-        SyncTransaction(block.vtx[index], confirm);
-        transactionRemovedFromMempool(block.vtx[index]);
+        SyncTransaction(block.vtx[index], {CWalletTx::Status::CONFIRMED, height, block_hash, (int)index});
+        transactionRemovedFromMempool(block.vtx[index], MemPoolRemovalReason::BLOCK);
     }
 }
 
@@ -1144,8 +1167,7 @@ void CWallet::blockDisconnected(const CBlock& block, int height)
     m_last_block_processed_height = height - 1;
     m_last_block_processed = block.hashPrevBlock;
     for (const CTransactionRef& ptx : block.vtx) {
-        CWalletTx::Confirmation confirm(CWalletTx::Status::UNCONFIRMED, /* block_height */ 0, {}, /* nIndex */ 0);
-        SyncTransaction(ptx, confirm);
+        SyncTransaction(ptx, {CWalletTx::Status::UNCONFIRMED, /* block height */ 0, /* block hash */ {}, /* index */ 0});
     }
 }
 
@@ -1685,8 +1707,7 @@ CWallet::ScanResult CWallet::ScanForWalletTransactions(const uint256& start_bloc
                 break;
             }
             for (size_t posInBlock = 0; posInBlock < block.vtx.size(); ++posInBlock) {
-                CWalletTx::Confirmation confirm(CWalletTx::Status::CONFIRMED, block_height, block_hash, posInBlock);
-                SyncTransaction(block.vtx[posInBlock], confirm, fUpdate);
+                SyncTransaction(block.vtx[posInBlock], {CWalletTx::Status::CONFIRMED, block_height, block_hash, (int)posInBlock}, fUpdate);
             }
             // scan succeeded, record block as most recent successfully scanned
             result.last_scanned_block = block_hash;
@@ -1981,10 +2002,6 @@ void CWallet::ResendWalletTransactions()
     // resend 12-36 hours from now, ~1 day on average.
     nNextResend = GetTime() + (12 * 60 * 60) + GetRand(24 * 60 * 60);
     if (fFirst) return;
-
-    // Only do it if there's been a new block since last time
-    if (m_best_block_time < nLastResend) return;
-    nLastResend = GetTime();
 
     int submitted_tx_count = 0;
 
@@ -2974,7 +2991,7 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CTransac
     }
 
     if (nFeeRet > m_default_max_tx_fee) {
-        error = Untranslated(TransactionErrorString(TransactionError::MAX_FEE_EXCEEDED));
+        error = TransactionErrorString(TransactionError::MAX_FEE_EXCEEDED);
         return false;
     }
 
@@ -3654,7 +3671,7 @@ std::vector<std::string> CWallet::GetDestValues(const std::string& prefix) const
     return values;
 }
 
-bool CWallet::Verify(interfaces::Chain& chain, const WalletLocation& location, bool salvage_wallet, bilingual_str& error_string, std::vector<bilingual_str>& warnings)
+bool CWallet::Verify(interfaces::Chain& chain, const WalletLocation& location, bilingual_str& error_string, std::vector<bilingual_str>& warnings)
 {
     // Do some checking on wallet path. It should be either a:
     //
@@ -3694,16 +3711,7 @@ bool CWallet::Verify(interfaces::Chain& chain, const WalletLocation& location, b
         return false;
     }
 
-    if (salvage_wallet) {
-        // Recover readable keypairs:
-        CWallet dummyWallet(&chain, WalletLocation(), WalletDatabase::CreateDummy());
-        std::string backup_filename;
-        if (!WalletBatch::Recover(wallet_path, (void *)&dummyWallet, WalletBatch::RecoverKeysOnlyFilter, backup_filename)) {
-            return false;
-        }
-    }
-
-    return WalletBatch::VerifyDatabaseFile(wallet_path, warnings, error_string);
+    return WalletBatch::VerifyDatabaseFile(wallet_path, error_string);
 }
 
 std::shared_ptr<CWallet> CWallet::CreateWalletFromFile(interfaces::Chain& chain, const WalletLocation& location, bilingual_str& error, std::vector<bilingual_str>& warnings, uint64_t wallet_creation_flags)
@@ -4366,7 +4374,7 @@ void CWallet::SetupDescriptorScriptPubKeyMans()
 
     for (bool internal : {false, true}) {
         for (OutputType t : OUTPUT_TYPES) {
-            auto spk_manager = std::unique_ptr<DescriptorScriptPubKeyMan>(new DescriptorScriptPubKeyMan(*this, t, internal));
+            auto spk_manager = std::unique_ptr<DescriptorScriptPubKeyMan>(new DescriptorScriptPubKeyMan(*this, internal));
             if (IsCrypted()) {
                 if (IsLocked()) {
                     throw std::runtime_error(std::string(__func__) + ": Wallet is locked, cannot setup new descriptors");
@@ -4375,7 +4383,7 @@ void CWallet::SetupDescriptorScriptPubKeyMans()
                     throw std::runtime_error(std::string(__func__) + ": Could not encrypt new descriptors");
                 }
             }
-            spk_manager->SetupDescriptorGeneration(master_key);
+            spk_manager->SetupDescriptorGeneration(master_key, t);
             uint256 id = spk_manager->GetID();
             m_spk_managers[id] = std::move(spk_manager);
             SetActiveScriptPubKeyMan(id, t, internal);
@@ -4388,7 +4396,7 @@ void CWallet::SetActiveScriptPubKeyMan(uint256 id, OutputType type, bool interna
     WalletLogPrintf("Setting spkMan to active: id = %s, type = %d, internal = %d\n", id.ToString(), static_cast<int>(type), static_cast<int>(internal));
     auto& spk_mans = internal ? m_internal_spk_managers : m_external_spk_managers;
     auto spk_man = m_spk_managers.at(id).get();
-    spk_man->SetType(type, internal);
+    spk_man->SetInternal(internal);
     spk_mans[type] = spk_man;
 
     if (!memonly) {

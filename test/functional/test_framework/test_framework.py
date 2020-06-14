@@ -91,6 +91,9 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
 
     This class also contains various public and private helper methods."""
 
+    chain = None  # type: str
+    setup_clean_chain = None  # type: bool
+
     def __init__(self):
         """Sets test framework defaults. Do not override this method. Instead, override the set_test_params() method"""
         self.chain = 'regtest'
@@ -102,7 +105,9 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
         self.bind_to_localhost_only = True
         self.set_test_params()
         self.parse_args()
-        self.rpc_timeout = int(self.rpc_timeout * self.options.factor) # optionally, increase timeout by a factor
+        if self.options.timeout_factor == 0 :
+            self.options.timeout_factor = 99999
+        self.rpc_timeout = int(self.rpc_timeout * self.options.timeout_factor) # optionally, increase timeout by a factor
 
     def main(self):
         """Main function. This should not be overridden by the subclass test scripts."""
@@ -138,6 +143,7 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
             sys.exit(exit_code)
 
     def parse_args(self):
+        previous_releases_path = os.getenv("PREVIOUS_RELEASES_DIR") or os.getcwd() + "/releases"
         parser = argparse.ArgumentParser(usage="%(prog)s [options]")
         parser.add_argument("--nocleanup", dest="nocleanup", default=False, action="store_true",
                             help="Leave bitcoinds and test.* datadir on exit or error")
@@ -152,6 +158,9 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
                             help="Print out all RPC calls as they are made")
         parser.add_argument("--portseed", dest="port_seed", default=os.getpid(), type=int,
                             help="The seed to use for assigning port numbers (default: current process id)")
+        parser.add_argument("--previous-releases", dest="prev_releases", action="store_true",
+                            default=os.path.isdir(previous_releases_path) and bool(os.listdir(previous_releases_path)),
+                            help="Force test of previous releases (default: %(default)s)")
         parser.add_argument("--coveragedir", dest="coveragedir",
                             help="Write tested RPC commands into this directory")
         parser.add_argument("--configfile", dest="configfile",
@@ -169,9 +178,10 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
                             help="set a random seed for deterministically reproducing a previous test run")
         parser.add_argument("--descriptors", default=False, action="store_true",
                             help="Run test using a descriptor wallet")
-        parser.add_argument('--factor', type=float, default=1.0, help='adjust test timeouts by a factor')
+        parser.add_argument('--timeout-factor', dest="timeout_factor", type=float, default=1.0, help='adjust test timeouts by a factor. Setting it to 0 disables all timeouts')
         self.add_options(parser)
         self.options = parser.parse_args()
+        self.options.previous_releases_path = previous_releases_path
 
     def setup(self):
         """Call this method to start up the test framework object with options set."""
@@ -185,10 +195,18 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
         config = configparser.ConfigParser()
         config.read_file(open(self.options.configfile))
         self.config = config
-        self.options.bitcoind = os.getenv("BITCOIND", default=config["environment"]["BUILDDIR"] + '/src/bitcoind' + config["environment"]["EXEEXT"])
-        self.options.bitcoincli = os.getenv("BITCOINCLI", default=config["environment"]["BUILDDIR"] + '/src/bitcoin-cli' + config["environment"]["EXEEXT"])
-
-        self.options.previous_releases_path = os.getenv("PREVIOUS_RELEASES_DIR") or os.getcwd() + "/releases"
+        fname_bitcoind = os.path.join(
+            config["environment"]["BUILDDIR"],
+            "src",
+            "bitcoind" + config["environment"]["EXEEXT"],
+        )
+        fname_bitcoincli = os.path.join(
+            config["environment"]["BUILDDIR"],
+            "src",
+            "bitcoin-cli" + config["environment"]["EXEEXT"],
+        )
+        self.options.bitcoind = os.getenv("BITCOIND", default=fname_bitcoind)
+        self.options.bitcoincli = os.getenv("BITCOINCLI", default=fname_bitcoincli)
 
         os.environ['PATH'] = os.pathsep.join([
             os.path.join(config['environment']['BUILDDIR'], 'src'),
@@ -275,7 +293,12 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
             exit_code = TEST_EXIT_SKIPPED
         else:
             self.log.error("Test failed. Test logging available at %s/test_framework.log", self.options.tmpdir)
+            self.log.error("")
             self.log.error("Hint: Call {} '{}' to consolidate all logs".format(os.path.normpath(os.path.dirname(os.path.realpath(__file__)) + "/../combine_logs.py"), self.options.tmpdir))
+            self.log.error("")
+            self.log.error("If this failure happened unexpectedly or intermittently, please file a bug and provide a link or upload of the combined log.")
+            self.log.error(self.config['environment']['PACKAGE_BUGREPORT'])
+            self.log.error("")
             exit_code = TEST_EXIT_FAILED
         # Logging.shutdown will not remove stream- and filehandlers, so we must
         # do it explicitly. Handlers are removed so the next test run can apply
@@ -387,7 +410,7 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
 
     # Public helper methods. These can be accessed by the subclass test scripts.
 
-    def add_nodes(self, num_nodes, extra_args=None, *, rpchost=None, binary=None, binary_cli=None, versions=None):
+    def add_nodes(self, num_nodes: int, extra_args=None, *, rpchost=None, binary=None, binary_cli=None, versions=None):
         """Instantiate TestNode objects.
 
         Should only be called once after the nodes have been specified in
@@ -435,7 +458,7 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
                 chain=self.chain,
                 rpchost=rpchost,
                 timewait=self.rpc_timeout,
-                factor=self.options.factor,
+                timeout_factor=self.options.timeout_factor,
                 bitcoind=binary[i],
                 bitcoin_cli=binary_cli[i],
                 version=versions[i],
@@ -508,7 +531,6 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
         Split the network of four nodes into nodes 0/1 and 2/3.
         """
         disconnect_nodes(self.nodes[1], 2)
-        disconnect_nodes(self.nodes[2], 1)
         self.sync_all(self.nodes[:2])
         self.sync_all(self.nodes[2:])
 
@@ -582,7 +604,7 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
                     extra_args=['-disablewallet'],
                     rpchost=None,
                     timewait=self.rpc_timeout,
-                    factor=self.options.factor,
+                    timeout_factor=self.options.timeout_factor,
                     bitcoind=self.options.bitcoind,
                     bitcoin_cli=self.options.bitcoincli,
                     coverage_dir=None,
@@ -672,17 +694,11 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
 
     def has_previous_releases(self):
         """Checks whether previous releases are present and enabled."""
-        if os.getenv("TEST_PREVIOUS_RELEASES") == "false":
-            # disabled
-            return False
-
         if not os.path.isdir(self.options.previous_releases_path):
-            if os.getenv("TEST_PREVIOUS_RELEASES") == "true":
-                raise AssertionError("TEST_PREVIOUS_RELEASES=true but releases missing: {}".format(
+            if self.options.prev_releases:
+                raise AssertionError("Force test of previous releases but releases missing: {}".format(
                     self.options.previous_releases_path))
-            # missing
-            return False
-        return True
+        return self.options.prev_releases
 
     def is_cli_compiled(self):
         """Checks whether bitcoin-cli was compiled."""

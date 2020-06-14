@@ -20,6 +20,7 @@ from test_framework.script import CScript, OP_HASH160, OP_CHECKSIG, OP_0, hash16
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
+    assert_is_hex_string,
     assert_raises_rpc_error,
     connect_nodes,
     hex_str_to_bytes,
@@ -108,12 +109,7 @@ class SegWitTest(BitcoinTestFramework):
         assert tmpl['sigoplimit'] == 20000
         assert tmpl['transactions'][0]['hash'] == txid
         assert tmpl['transactions'][0]['sigops'] == 2
-        tmpl = self.nodes[0].getblocktemplate({'rules': ['segwit']})
-        assert tmpl['sizelimit'] == 1000000
-        assert 'weightlimit' not in tmpl
-        assert tmpl['sigoplimit'] == 20000
-        assert tmpl['transactions'][0]['hash'] == txid
-        assert tmpl['transactions'][0]['sigops'] == 2
+        assert '!segwit' not in tmpl['rules']
         self.nodes[0].generate(1)  # block 162
 
         balance_presetup = self.nodes[0].getbalance()
@@ -193,6 +189,14 @@ class SegWitTest(BitcoinTestFramework):
             assert self.nodes[1].getrawtransaction(tx_id, False, blockhash) == self.nodes[2].gettransaction(tx_id)["hex"]
             assert self.nodes[0].getrawtransaction(tx_id, False, blockhash) == tx.serialize_without_witness().hex()
 
+        # Coinbase contains the witness commitment nonce, check that RPC shows us
+        coinbase_txid = self.nodes[2].getblock(blockhash)['tx'][0]
+        coinbase_tx = self.nodes[2].gettransaction(txid=coinbase_txid, verbose=True)
+        witnesses = coinbase_tx["decoded"]["vin"][0]["txinwitness"]
+        assert_equal(len(witnesses), 1)
+        assert_is_hex_string(witnesses[0])
+        assert_equal(witnesses[0], '00'*32)
+
         self.log.info("Verify witness txs without witness data are invalid after the fork")
         self.fail_accept(self.nodes[2], 'non-mandatory-script-verify-flag (Witness program hash mismatch)', wit_ids[NODE_2][P2WPKH][2], sign=False)
         self.fail_accept(self.nodes[2], 'non-mandatory-script-verify-flag (Witness program was passed an empty witness)', wit_ids[NODE_2][P2WSH][2], sign=False)
@@ -213,6 +217,7 @@ class SegWitTest(BitcoinTestFramework):
         assert tmpl['sigoplimit'] == 80000
         assert tmpl['transactions'][0]['txid'] == txid
         assert tmpl['transactions'][0]['sigops'] == 8
+        assert '!segwit' in tmpl['rules']
 
         self.nodes[0].generate(1)  # Mine a block to clear the gbt cache
 

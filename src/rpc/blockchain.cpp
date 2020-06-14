@@ -29,8 +29,10 @@
 #include <txdb.h>
 #include <txmempool.h>
 #include <undo.h>
+#include <util/ref.h>
 #include <util/strencodings.h>
 #include <util/system.h>
+#include <util/translation.h>
 #include <validation.h>
 #include <validationinterface.h>
 #include <warnings.h>
@@ -51,15 +53,29 @@ struct CUpdatedBlock
 
 static Mutex cs_blockchange;
 static std::condition_variable cond_blockchange;
-static CUpdatedBlock latestblock;
+static CUpdatedBlock latestblock GUARDED_BY(cs_blockchange);
 
-CTxMemPool& EnsureMemPool()
+NodeContext& EnsureNodeContext(const util::Ref& context)
 {
-    CHECK_NONFATAL(g_rpc_node);
-    if (!g_rpc_node->mempool) {
+    if (!context.Has<NodeContext>()) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "Node context not found");
+    }
+    return context.Get<NodeContext>();
+}
+
+CTxMemPool& EnsureMemPool(const util::Ref& context)
+{
+    NodeContext& node = EnsureNodeContext(context);
+    if (!node.mempool) {
         throw JSONRPCError(RPC_CLIENT_MEMPOOL_DISABLED, "Mempool disabled or instance not found");
     }
-    return *g_rpc_node->mempool;
+    return *node.mempool;
+}
+
+ChainstateManager& EnsureChainman(const util::Ref& context)
+{
+    NodeContext& node = EnsureNodeContext(context);
+    return EnsureChainman(node);
 }
 
 /* Calculate the difficulty for a given block index.
@@ -205,10 +221,10 @@ static UniValue getbestblockhash(const JSONRPCRequest& request)
     return ::ChainActive().Tip()->GetBlockHash().GetHex();
 }
 
-void RPCNotifyBlockChange(bool ibd, const CBlockIndex * pindex)
+void RPCNotifyBlockChange(const CBlockIndex* pindex)
 {
     if(pindex) {
-        std::lock_guard<std::mutex> lock(cs_blockchange);
+        LOCK(cs_blockchange);
         latestblock.hash = pindex->GetBlockHash();
         latestblock.height = pindex->nHeight;
     }
@@ -243,9 +259,9 @@ static UniValue waitfornewblock(const JSONRPCRequest& request)
         WAIT_LOCK(cs_blockchange, lock);
         block = latestblock;
         if(timeout)
-            cond_blockchange.wait_for(lock, std::chrono::milliseconds(timeout), [&block]{return latestblock.height != block.height || latestblock.hash != block.hash || !IsRPCRunning(); });
+            cond_blockchange.wait_for(lock, std::chrono::milliseconds(timeout), [&block]() EXCLUSIVE_LOCKS_REQUIRED(cs_blockchange) {return latestblock.height != block.height || latestblock.hash != block.hash || !IsRPCRunning(); });
         else
-            cond_blockchange.wait(lock, [&block]{return latestblock.height != block.height || latestblock.hash != block.hash || !IsRPCRunning(); });
+            cond_blockchange.wait(lock, [&block]() EXCLUSIVE_LOCKS_REQUIRED(cs_blockchange) {return latestblock.height != block.height || latestblock.hash != block.hash || !IsRPCRunning(); });
         block = latestblock;
     }
     UniValue ret(UniValue::VOBJ);
@@ -285,9 +301,9 @@ static UniValue waitforblock(const JSONRPCRequest& request)
     {
         WAIT_LOCK(cs_blockchange, lock);
         if(timeout)
-            cond_blockchange.wait_for(lock, std::chrono::milliseconds(timeout), [&hash]{return latestblock.hash == hash || !IsRPCRunning();});
+            cond_blockchange.wait_for(lock, std::chrono::milliseconds(timeout), [&hash]() EXCLUSIVE_LOCKS_REQUIRED(cs_blockchange) {return latestblock.hash == hash || !IsRPCRunning();});
         else
-            cond_blockchange.wait(lock, [&hash]{return latestblock.hash == hash || !IsRPCRunning(); });
+            cond_blockchange.wait(lock, [&hash]() EXCLUSIVE_LOCKS_REQUIRED(cs_blockchange) {return latestblock.hash == hash || !IsRPCRunning(); });
         block = latestblock;
     }
 
@@ -329,9 +345,9 @@ static UniValue waitforblockheight(const JSONRPCRequest& request)
     {
         WAIT_LOCK(cs_blockchange, lock);
         if(timeout)
-            cond_blockchange.wait_for(lock, std::chrono::milliseconds(timeout), [&height]{return latestblock.height >= height || !IsRPCRunning();});
+            cond_blockchange.wait_for(lock, std::chrono::milliseconds(timeout), [&height]() EXCLUSIVE_LOCKS_REQUIRED(cs_blockchange) {return latestblock.height >= height || !IsRPCRunning();});
         else
-            cond_blockchange.wait(lock, [&height]{return latestblock.height >= height || !IsRPCRunning(); });
+            cond_blockchange.wait(lock, [&height]() EXCLUSIVE_LOCKS_REQUIRED(cs_blockchange) {return latestblock.height >= height || !IsRPCRunning(); });
         block = latestblock;
     }
     UniValue ret(UniValue::VOBJ);
@@ -399,6 +415,7 @@ static std::vector<RPCResult> MempoolEntryDescription() { return {
     RPCResult{RPCResult::Type::ARR, "spentby", "unconfirmed transactions spending outputs from this transaction",
         {RPCResult{RPCResult::Type::STR_HEX, "transactionid", "child transaction id"}}},
     RPCResult{RPCResult::Type::BOOL, "bip125-replaceable", "Whether this transaction could be replaced due to BIP125 (replace-by-fee)"},
+    RPCResult{RPCResult::Type::BOOL, "unbroadcast", "Whether this transaction is currently unbroadcast (initial broadcast not yet acknowledged by any peers)"},
 };}
 
 static void entryToJSON(const CTxMemPool& pool, UniValue& info, const CTxMemPoolEntry& e) EXCLUSIVE_LOCKS_REQUIRED(pool.cs)
@@ -460,6 +477,7 @@ static void entryToJSON(const CTxMemPool& pool, UniValue& info, const CTxMemPool
     }
 
     info.pushKV("bip125-replaceable", rbfStatus);
+    info.pushKV("unbroadcast", pool.IsUnbroadcastTx(tx.GetHash()));
 }
 
 UniValue MempoolToJSON(const CTxMemPool& pool, bool verbose)
@@ -519,7 +537,7 @@ static UniValue getrawmempool(const JSONRPCRequest& request)
     if (!request.params[0].isNull())
         fVerbose = request.params[0].get_bool();
 
-    return MempoolToJSON(EnsureMemPool(), fVerbose);
+    return MempoolToJSON(EnsureMemPool(request.context), fVerbose);
 }
 
 static UniValue getmempoolancestors(const JSONRPCRequest& request)
@@ -549,7 +567,7 @@ static UniValue getmempoolancestors(const JSONRPCRequest& request)
 
     uint256 hash = ParseHashV(request.params[0], "parameter 1");
 
-    const CTxMemPool& mempool = EnsureMemPool();
+    const CTxMemPool& mempool = EnsureMemPool(request.context);
     LOCK(mempool.cs);
 
     CTxMemPool::txiter it = mempool.mapTx.find(hash);
@@ -612,7 +630,7 @@ static UniValue getmempooldescendants(const JSONRPCRequest& request)
 
     uint256 hash = ParseHashV(request.params[0], "parameter 1");
 
-    const CTxMemPool& mempool = EnsureMemPool();
+    const CTxMemPool& mempool = EnsureMemPool(request.context);
     LOCK(mempool.cs);
 
     CTxMemPool::txiter it = mempool.mapTx.find(hash);
@@ -662,7 +680,7 @@ static UniValue getmempoolentry(const JSONRPCRequest& request)
 
     uint256 hash = ParseHashV(request.params[0], "parameter 1");
 
-    const CTxMemPool& mempool = EnsureMemPool();
+    const CTxMemPool& mempool = EnsureMemPool(request.context);
     LOCK(mempool.cs);
 
     CTxMemPool::txiter it = mempool.mapTx.find(hash);
@@ -979,7 +997,7 @@ static UniValue gettxoutsetinfo(const JSONRPCRequest& request)
     ::ChainstateActive().ForceFlushStateToDisk();
 
     CCoinsView* coins_view = WITH_LOCK(cs_main, return &ChainstateActive().CoinsDB());
-    if (GetUTXOStats(coins_view, stats)) {
+    if (GetUTXOStats(coins_view, stats, RpcInterruptionPoint)) {
         ret.pushKV("height", (int64_t)stats.nHeight);
         ret.pushKV("bestblock", stats.hashBlock.GetHex());
         ret.pushKV("transactions", (int64_t)stats.nTransactions);
@@ -1045,7 +1063,7 @@ UniValue gettxout(const JSONRPCRequest& request)
     CCoinsViewCache* coins_view = &::ChainstateActive().CoinsTip();
 
     if (fMempool) {
-        const CTxMemPool& mempool = EnsureMemPool();
+        const CTxMemPool& mempool = EnsureMemPool(request.context);
         LOCK(mempool.cs);
         CCoinsViewMemPool view(coins_view, mempool);
         if (!view.GetCoin(out, coin) || mempool.isSpent(out)) {
@@ -1078,7 +1096,8 @@ static UniValue verifychain(const JSONRPCRequest& request)
             RPCHelpMan{"verifychain",
                 "\nVerifies blockchain database.\n",
                 {
-                    {"checklevel", RPCArg::Type::NUM, /* default */ strprintf("%d, range=0-4", DEFAULT_CHECKLEVEL), "How thorough the block verification is."},
+                    {"checklevel", RPCArg::Type::NUM, /* default */ strprintf("%d, range=0-4", DEFAULT_CHECKLEVEL),
+                        strprintf("How thorough the block verification is:\n - %s", Join(CHECKLEVEL_DOC, "\n- "))},
                     {"nblocks", RPCArg::Type::NUM, /* default */ strprintf("%d, 0=all", DEFAULT_CHECKBLOCKS), "The number of blocks to check."},
                 },
                 RPCResult{
@@ -1260,7 +1279,7 @@ UniValue getblockchaininfo(const JSONRPCRequest& request)
     BIP9SoftForkDescPushBack(softforks, "testdummy", consensusParams, Consensus::DEPLOYMENT_TESTDUMMY);
     obj.pushKV("softforks",             softforks);
 
-    obj.pushKV("warnings", GetWarnings(false));
+    obj.pushKV("warnings", GetWarnings(false).original);
     return obj;
 }
 
@@ -1389,7 +1408,7 @@ UniValue MempoolInfoToJSON(const CTxMemPool& pool)
     ret.pushKV("maxmempool", (int64_t) maxmempool);
     ret.pushKV("mempoolminfee", ValueFromAmount(std::max(pool.GetMinFee(maxmempool), ::minRelayTxFee).GetFeePerK()));
     ret.pushKV("minrelaytxfee", ValueFromAmount(::minRelayTxFee.GetFeePerK()));
-
+    ret.pushKV("unbroadcastcount", uint64_t{pool.GetUnbroadcastTxs().size()});
     return ret;
 }
 
@@ -1408,6 +1427,7 @@ static UniValue getmempoolinfo(const JSONRPCRequest& request)
                         {RPCResult::Type::NUM, "maxmempool", "Maximum memory usage for the mempool"},
                         {RPCResult::Type::STR_AMOUNT, "mempoolminfee", "Minimum fee rate in " + CURRENCY_UNIT + "/kB for tx to be accepted. Is the maximum of minrelaytxfee and minimum mempool fee"},
                         {RPCResult::Type::STR_AMOUNT, "minrelaytxfee", "Current minimum relay fee for transactions"},
+                        {RPCResult::Type::NUM, "unbroadcastcount", "Current number of transactions that haven't passed initial broadcast yet"}
                     }},
                 RPCExamples{
                     HelpExampleCli("getmempoolinfo", "")
@@ -1415,7 +1435,7 @@ static UniValue getmempoolinfo(const JSONRPCRequest& request)
                 },
             }.Check(request);
 
-    return MempoolInfoToJSON(EnsureMemPool());
+    return MempoolInfoToJSON(EnsureMemPool(request.context));
 }
 
 static UniValue preciousblock(const JSONRPCRequest& request)
@@ -1934,7 +1954,7 @@ static UniValue savemempool(const JSONRPCRequest& request)
                 },
             }.Check(request);
 
-    const CTxMemPool& mempool = EnsureMemPool();
+    const CTxMemPool& mempool = EnsureMemPool(request.context);
 
     if (!mempool.IsLoaded()) {
         throw JSONRPCError(RPC_MISC_ERROR, "The mempool was not loaded yet");
@@ -1956,6 +1976,7 @@ bool FindScriptPubKey(std::atomic<int>& scan_progress, const std::atomic<bool>& 
         Coin coin;
         if (!cursor->GetKey(key) || !cursor->GetValue(coin)) return false;
         if (++count % 8192 == 0) {
+            RpcInterruptionPoint();
             if (should_abort) {
                 // allow to abort the scan via the abort reference
                 return false;
@@ -1976,7 +1997,6 @@ bool FindScriptPubKey(std::atomic<int>& scan_progress, const std::atomic<bool>& 
 }
 
 /** RAII object to prevent concurrency issue when scanning the txout set */
-static std::mutex g_utxosetscan;
 static std::atomic<int> g_scan_progress;
 static std::atomic<bool> g_scan_in_progress;
 static std::atomic<bool> g_should_abort_scan;
@@ -1989,18 +2009,15 @@ public:
 
     bool reserve() {
         CHECK_NONFATAL(!m_could_reserve);
-        std::lock_guard<std::mutex> lock(g_utxosetscan);
-        if (g_scan_in_progress) {
+        if (g_scan_in_progress.exchange(true)) {
             return false;
         }
-        g_scan_in_progress = true;
         m_could_reserve = true;
         return true;
     }
 
     ~CoinsViewScanReserver() {
         if (m_could_reserve) {
-            std::lock_guard<std::mutex> lock(g_utxosetscan);
             g_scan_in_progress = false;
         }
     }
@@ -2299,7 +2316,7 @@ UniValue dumptxoutset(const JSONRPCRequest& request)
 
         ::ChainstateActive().ForceFlushStateToDisk();
 
-        if (!GetUTXOStats(&::ChainstateActive().CoinsDB(), stats)) {
+        if (!GetUTXOStats(&::ChainstateActive().CoinsDB(), stats, RpcInterruptionPoint)) {
             throw JSONRPCError(RPC_INTERNAL_ERROR, "Unable to read UTXO set");
         }
 
@@ -2317,9 +2334,7 @@ UniValue dumptxoutset(const JSONRPCRequest& request)
     unsigned int iter{0};
 
     while (pcursor->Valid()) {
-        if (iter % 5000 == 0 && !IsRPCRunning()) {
-            throw JSONRPCError(RPC_CLIENT_NOT_CONNECTED, "Shutting down");
-        }
+        if (iter % 5000 == 0) RpcInterruptionPoint();
         ++iter;
         if (pcursor->GetKey(key) && pcursor->GetValue(coin)) {
             afile << key;
@@ -2385,5 +2400,3 @@ static const CRPCCommand commands[] =
     for (unsigned int vcidx = 0; vcidx < ARRAYLEN(commands); vcidx++)
         t.appendCommand(commands[vcidx].name, &commands[vcidx]);
 }
-
-NodeContext* g_rpc_node = nullptr;

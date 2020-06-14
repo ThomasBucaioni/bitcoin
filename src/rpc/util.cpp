@@ -10,6 +10,7 @@
 #include <tinyformat.h>
 #include <util/strencodings.h>
 #include <util/string.h>
+#include <util/translation.h>
 
 #include <tuple>
 
@@ -285,7 +286,7 @@ UniValue JSONRPCTransactionError(TransactionError terr, const std::string& err_s
     if (err_string.length() > 0) {
         return JSONRPCError(RPCErrorFromTransactionError(terr), err_string);
     } else {
-        return JSONRPCError(RPCErrorFromTransactionError(terr), TransactionErrorString(terr));
+        return JSONRPCError(RPCErrorFromTransactionError(terr), TransactionErrorString(terr).original);
     }
 }
 
@@ -843,16 +844,9 @@ UniValue GetServicesNames(ServiceFlags services)
 {
     UniValue servicesNames(UniValue::VARR);
 
-    if (services & NODE_NETWORK)
-        servicesNames.push_back("NETWORK");
-    if (services & NODE_GETUTXO)
-        servicesNames.push_back("GETUTXO");
-    if (services & NODE_BLOOM)
-        servicesNames.push_back("BLOOM");
-    if (services & NODE_WITNESS)
-        servicesNames.push_back("WITNESS");
-    if (services & NODE_NETWORK_LIMITED)
-        servicesNames.push_back("NETWORK_LIMITED");
+    for (const auto& flag : serviceFlagsToStr(services)) {
+        servicesNames.push_back(flag);
+    }
 
     return servicesNames;
 }

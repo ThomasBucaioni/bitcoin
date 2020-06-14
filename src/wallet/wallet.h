@@ -51,7 +51,6 @@ void UnloadWallet(std::shared_ptr<CWallet>&& wallet);
 
 bool AddWallet(const std::shared_ptr<CWallet>& wallet);
 bool RemoveWallet(const std::shared_ptr<CWallet>& wallet);
-bool HasWallets();
 std::vector<std::shared_ptr<CWallet>> GetWallets();
 std::shared_ptr<CWallet> GetWallet(const std::string& name);
 std::shared_ptr<CWallet> LoadWallet(interfaces::Chain& chain, const WalletLocation& location, bilingual_str& error, std::vector<bilingual_str>& warnings);
@@ -631,7 +630,6 @@ private:
     std::atomic<bool> fScanningWallet{false}; // controlled by WalletRescanReserver
     std::atomic<int64_t> m_scanning_start{0};
     std::atomic<double> m_scanning_progress{0};
-    std::mutex mutexScanning;
     friend class WalletRescanReserver;
 
     //! the current wallet version: clients below this version are not able to load the wallet
@@ -641,7 +639,6 @@ private:
     int nWalletMaxVersion GUARDED_BY(cs_wallet) = FEATURE_BASE;
 
     int64_t nNextResend = 0;
-    int64_t nLastResend = 0;
     bool fBroadcastTransactions = false;
     // Local time that the tip block was received. Used to schedule wallet rebroadcasts.
     std::atomic<int64_t> m_best_block_time {0};
@@ -871,8 +868,10 @@ public:
     std::vector<std::string> GetDestValues(const std::string& prefix) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     //! Holds a timestamp at which point the wallet is scheduled (externally) to be relocked. Caller must arrange for actual relocking to occur via Lock().
-    int64_t nRelockTime = 0;
+    int64_t nRelockTime GUARDED_BY(cs_wallet){0};
 
+    // Used to prevent concurrent calls to walletpassphrase RPC.
+    Mutex m_unlock_mutex;
     bool Unlock(const SecureString& strWalletPassphrase, bool accept_no_keys = false);
     bool ChangeWalletPassphrase(const SecureString& strOldWalletPassphrase, const SecureString& strNewWalletPassphrase);
     bool EncryptWallet(const SecureString& strWalletPassphrase);
@@ -921,7 +920,7 @@ public:
         uint256 last_failed_block;
     };
     ScanResult ScanForWalletTransactions(const uint256& start_block, int start_height, Optional<int> max_height, const WalletRescanReserver& reserver, bool fUpdate);
-    void transactionRemovedFromMempool(const CTransactionRef &ptx) override;
+    void transactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRemovalReason reason) override;
     void ReacceptWalletTransactions() EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     void ResendWalletTransactions();
     struct Balance {
@@ -1135,7 +1134,7 @@ public:
     bool MarkReplaced(const uint256& originalHash, const uint256& newHash);
 
     //! Verify wallet naming and perform salvage on the wallet if required
-    static bool Verify(interfaces::Chain& chain, const WalletLocation& location, bool salvage_wallet, bilingual_str& error_string, std::vector<bilingual_str>& warnings);
+    static bool Verify(interfaces::Chain& chain, const WalletLocation& location, bilingual_str& error_string, std::vector<bilingual_str>& warnings);
 
     /* Initializes the wallet, returns a new CWallet instance or a null pointer in case of an error */
     static std::shared_ptr<CWallet> CreateWalletFromFile(interfaces::Chain& chain, const WalletLocation& location, bilingual_str& error, std::vector<bilingual_str>& warnings, uint64_t wallet_creation_flags = 0);
@@ -1286,13 +1285,11 @@ public:
     bool reserve()
     {
         assert(!m_could_reserve);
-        std::lock_guard<std::mutex> lock(m_wallet.mutexScanning);
-        if (m_wallet.fScanningWallet) {
+        if (m_wallet.fScanningWallet.exchange(true)) {
             return false;
         }
         m_wallet.m_scanning_start = GetTimeMillis();
         m_wallet.m_scanning_progress = 0;
-        m_wallet.fScanningWallet = true;
         m_could_reserve = true;
         return true;
     }
@@ -1304,7 +1301,6 @@ public:
 
     ~WalletRescanReserver()
     {
-        std::lock_guard<std::mutex> lock(m_wallet.mutexScanning);
         if (m_could_reserve) {
             m_wallet.fScanningWallet = false;
         }

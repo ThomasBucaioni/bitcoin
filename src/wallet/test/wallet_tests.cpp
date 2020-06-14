@@ -15,6 +15,7 @@
 #include <rpc/server.h>
 #include <test/util/logging.h>
 #include <test/util/setup_common.h>
+#include <util/ref.h>
 #include <util/translation.h>
 #include <validation.h>
 #include <wallet/coincontrol.h>
@@ -117,7 +118,7 @@ BOOST_FIXTURE_TEST_CASE(scan_for_wallet_transactions, TestChain100Setup)
     // Prune the older block file.
     {
         LOCK(cs_main);
-        PruneOneBlockFile(oldTip->GetBlockPos().nFile);
+        EnsureChainman(m_node).PruneOneBlockFile(oldTip->GetBlockPos().nFile);
     }
     UnlinkPrunedFiles({oldTip->GetBlockPos().nFile});
 
@@ -143,7 +144,7 @@ BOOST_FIXTURE_TEST_CASE(scan_for_wallet_transactions, TestChain100Setup)
     // Prune the remaining block file.
     {
         LOCK(cs_main);
-        PruneOneBlockFile(newTip->GetBlockPos().nFile);
+        EnsureChainman(m_node).PruneOneBlockFile(newTip->GetBlockPos().nFile);
     }
     UnlinkPrunedFiles({newTip->GetBlockPos().nFile});
 
@@ -180,7 +181,7 @@ BOOST_FIXTURE_TEST_CASE(importmulti_rescan, TestChain100Setup)
     // Prune the older block file.
     {
         LOCK(cs_main);
-        PruneOneBlockFile(oldTip->GetBlockPos().nFile);
+        EnsureChainman(m_node).PruneOneBlockFile(oldTip->GetBlockPos().nFile);
     }
     UnlinkPrunedFiles({oldTip->GetBlockPos().nFile});
 
@@ -208,7 +209,8 @@ BOOST_FIXTURE_TEST_CASE(importmulti_rescan, TestChain100Setup)
         key.pushKV("timestamp", newTip->GetBlockTimeMax() + TIMESTAMP_WINDOW + 1);
         key.pushKV("internal", UniValue(true));
         keys.push_back(key);
-        JSONRPCRequest request;
+        util::Ref context;
+        JSONRPCRequest request(context);
         request.params.setArray();
         request.params.push_back(keys);
 
@@ -262,7 +264,8 @@ BOOST_FIXTURE_TEST_CASE(importwallet_rescan, TestChain100Setup)
             AddWallet(wallet);
             wallet->SetLastBlockProcessed(::ChainActive().Height(), ::ChainActive().Tip()->GetBlockHash());
         }
-        JSONRPCRequest request;
+        util::Ref context;
+        JSONRPCRequest request(context);
         request.params.setArray();
         request.params.push_back(backup_file);
 
@@ -277,7 +280,8 @@ BOOST_FIXTURE_TEST_CASE(importwallet_rescan, TestChain100Setup)
         LOCK(wallet->cs_wallet);
         wallet->SetupLegacyScriptPubKeyMan();
 
-        JSONRPCRequest request;
+        util::Ref context;
+        JSONRPCRequest request(context);
         request.params.setArray();
         request.params.push_back(backup_file);
         AddWallet(wallet);
@@ -531,7 +535,6 @@ public:
         return it->second;
     }
 
-    NodeContext m_node;
     std::unique_ptr<interfaces::Chain> m_chain = interfaces::MakeChain(m_node);
     std::unique_ptr<CWallet> wallet;
 };
@@ -742,8 +745,8 @@ BOOST_FIXTURE_TEST_CASE(CreateWalletFromFile, TestChain100Setup)
     BOOST_CHECK_EQUAL(addtx_count, 2);
     {
         LOCK(wallet->cs_wallet);
-        BOOST_CHECK_EQUAL(wallet->mapWallet.count(block_tx.GetHash()), 1);
-        BOOST_CHECK_EQUAL(wallet->mapWallet.count(mempool_tx.GetHash()), 1);
+        BOOST_CHECK_EQUAL(wallet->mapWallet.count(block_tx.GetHash()), 1U);
+        BOOST_CHECK_EQUAL(wallet->mapWallet.count(mempool_tx.GetHash()), 1U);
     }
 
 
@@ -779,8 +782,8 @@ BOOST_FIXTURE_TEST_CASE(CreateWalletFromFile, TestChain100Setup)
     BOOST_CHECK_EQUAL(addtx_count, 4);
     {
         LOCK(wallet->cs_wallet);
-        BOOST_CHECK_EQUAL(wallet->mapWallet.count(block_tx.GetHash()), 1);
-        BOOST_CHECK_EQUAL(wallet->mapWallet.count(mempool_tx.GetHash()), 1);
+        BOOST_CHECK_EQUAL(wallet->mapWallet.count(block_tx.GetHash()), 1U);
+        BOOST_CHECK_EQUAL(wallet->mapWallet.count(mempool_tx.GetHash()), 1U);
     }
 
 

@@ -62,6 +62,8 @@ static const int MAX_OUTBOUND_FULL_RELAY_CONNECTIONS = 8;
 static const int MAX_ADDNODE_CONNECTIONS = 8;
 /** Maximum number of block-relay-only outgoing connections */
 static const int MAX_BLOCKS_ONLY_CONNECTIONS = 2;
+/** Maximum number of feeler connections */
+static const int MAX_FEELER_CONNECTIONS = 1;
 /** -listen default */
 static const bool DEFAULT_LISTEN = true;
 /** -upnp default */
@@ -452,7 +454,7 @@ private:
     const uint64_t nSeed0, nSeed1;
 
     /** flag for waking the message processor. */
-    bool fMsgProcWake;
+    bool fMsgProcWake GUARDED_BY(mutexMsgProc);
 
     std::condition_variable condMsgProc;
     Mutex mutexMsgProc;
