@@ -78,9 +78,6 @@ static void SetupBitcoinTxArgs(ArgsManager &argsman)
 //
 static int AppInitRawTx(int argc, char* argv[])
 {
-    //
-    // Parameters
-    //
     SetupBitcoinTxArgs(gArgs);
     std::string error;
     if (!gArgs.ParseParameters(argc, argv, error)) {
@@ -88,7 +85,7 @@ static int AppInitRawTx(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
-    // Check for -chain, -testnet or -regtest parameter (Params() calls are only valid after this clause)
+    // Check for chain settings (Params() calls are only valid after this clause)
     try {
         SelectParams(gArgs.GetChainName());
     } catch (const std::exception& e) {
@@ -320,8 +317,8 @@ static void MutateTxAddOutPubKey(CMutableTransaction& tx, const std::string& str
         if (!pubkey.IsCompressed()) {
             throw std::runtime_error("Uncompressed pubkeys are not useable for SegWit outputs");
         }
-        // Call GetScriptForWitness() to build a P2WSH scriptPubKey
-        scriptPubKey = GetScriptForWitness(scriptPubKey);
+        // Build a P2WPKH script
+        scriptPubKey = GetScriptForDestination(WitnessV0KeyHash(pubkey));
     }
     if (bScriptHash) {
         // Get the ID for the script, and then construct a P2SH destination for it.
@@ -390,8 +387,8 @@ static void MutateTxAddOutMultiSig(CMutableTransaction& tx, const std::string& s
                 throw std::runtime_error("Uncompressed pubkeys are not useable for SegWit outputs");
             }
         }
-        // Call GetScriptForWitness() to build a P2WSH scriptPubKey
-        scriptPubKey = GetScriptForWitness(scriptPubKey);
+        // Build a P2WSH with the multisig script
+        scriptPubKey = GetScriptForDestination(WitnessV0ScriptHash(scriptPubKey));
     }
     if (bScriptHash) {
         if (scriptPubKey.size() > MAX_SCRIPT_ELEMENT_SIZE) {
@@ -464,7 +461,7 @@ static void MutateTxAddOutScript(CMutableTransaction& tx, const std::string& str
     }
 
     if (bSegWit) {
-        scriptPubKey = GetScriptForWitness(scriptPubKey);
+        scriptPubKey = GetScriptForDestination(WitnessV0ScriptHash(scriptPubKey));
     }
     if (bScriptHash) {
         if (scriptPubKey.size() > MAX_SCRIPT_ELEMENT_SIZE) {
@@ -597,7 +594,7 @@ static void MutateTxSign(CMutableTransaction& tx, const std::string& flagStr)
 
             const int nOut = prevOut["vout"].get_int();
             if (nOut < 0)
-                throw std::runtime_error("vout must be positive");
+                throw std::runtime_error("vout cannot be negative");
 
             COutPoint out(txid, nOut);
             std::vector<unsigned char> pkData(ParseHexUV(prevOut["scriptPubKey"], "scriptPubKey"));
